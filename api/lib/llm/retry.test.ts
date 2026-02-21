@@ -339,6 +339,29 @@ describe("withLLMRetry", () => {
     expect(fn).toHaveBeenCalledTimes(2);
   });
 
+  it("normalizes NaN maxTotalElapsedMs to default budget", async () => {
+    const rateLimitError = makeAPICallError(429, { message: "Please retry in 200.0s" });
+    const fn = vi.fn().mockRejectedValue(rateLimitError);
+    const log = mockLogger();
+
+    const result = withLLMRetry(
+      fn,
+      { maxRetries: 3, maxRetryDelayMs: 200_000, maxTotalElapsedMs: NaN },
+      log
+    ).then(
+      () => "resolved",
+      () => "rejected"
+    );
+
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(await result).toBe("rejected");
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining("105.0s budget")
+    );
+  });
+
   it("ignores maxTotalElapsedMs when undefined", async () => {
     const rateLimitError = makeAPICallError(429, {
       message: "Please retry in 1.0s",
