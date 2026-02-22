@@ -536,4 +536,57 @@ describe("resolveInstallationBYOKConfig", () => {
       "Unsupported BYOK provider: vertex",
     );
   });
+
+  it("throws when envelope key version is not in master keys", async () => {
+    // The envelope references key version "v2" but only "v1" is in the master key map.
+    // This must be rejected — fail-closed on unknown key versions.
+    const masterKey = randomBytes(32);
+    setRedisEnv();
+    setMasterKeys({ v1: masterKey.toString("hex") });
+    stubRedisResponse({
+      result: buildEnvelope(
+        { apiKey: "sk", provider: "openai" },
+        masterKey,
+        { keyVersion: "v2" },
+      ),
+    });
+
+    await expect(resolveInstallationBYOKConfig(7)).rejects.toThrow(
+      "BYOK key version 'v2' is unavailable",
+    );
+  });
+
+  it("throws when ciphertext has been tampered with (GCM auth tag mismatch)", async () => {
+    // AES-256-GCM authentication must reject modified ciphertext.
+    // An attacker who controls the Redis record cannot forge valid ciphertext
+    // without knowledge of the master key.
+    const masterKey = randomBytes(32);
+    setRedisEnv();
+    setMasterKeys({ v1: masterKey.toString("hex") });
+
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", masterKey, iv);
+    const plaintext = JSON.stringify({ apiKey: "sk", provider: "openai" });
+    const ciphertext = Buffer.concat([
+      cipher.update(Buffer.from(plaintext, "utf8")),
+      cipher.final(),
+    ]);
+    const authTag = cipher.getAuthTag();
+
+    // Flip a bit in the ciphertext to simulate tampering
+    ciphertext[0] ^= 0xff;
+
+    const envelope = JSON.stringify({
+      ciphertext: ciphertext.toString("base64"),
+      iv: iv.toString("base64"),
+      tag: authTag.toString("base64"),
+      keyVersion: "v1",
+      status: "active",
+    });
+    stubRedisResponse({ result: envelope });
+
+    await expect(resolveInstallationBYOKConfig(7)).rejects.toThrow(
+      "BYOK key material could not be decrypted",
+    );
+  });
 });
